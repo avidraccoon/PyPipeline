@@ -1,5 +1,5 @@
 from functools import lru_cache, wraps
-from typing import Any, Dict, Generic, List, Self, Type, TypeAlias, TypeVar, Callable
+from typing import Any, Dict, Generic, List, Self, Type, TypeAlias, TypeVar, Callable, Union
 from dataclasses import dataclass
 
 CACHE_SIZE = None
@@ -179,13 +179,22 @@ PipelineStages: TypeAlias = List[PipelineStage]
 
 class Pipeline:
 
-    def __init__(self):
+    def __init__(self, dependencies: PipelineInputMap =None, outputs: PipelineInputMap=None):
         super().__init__()
         self.transforms: PipelineTransformers = []
         self.stages: PipelineStages = []
         self.data_records: PipelineDataMap = {}
-        self.dependencies: PipelineInputMap = {}
-        self.outputs: PipelineOutputMap = {}
+        self._deps_set = True
+        if dependencies is None:
+            dependencies = {}
+            self._deps_set = False
+        self.dependencies: PipelineInputMap = dependencies
+        self._out_set = True
+        if outputs is None:
+            outputs = {}
+            self._out_set = False
+        self.outputs: PipelineOutputMap = outputs
+
 
     def get_dependencies(self) -> PipelineInputMap:
         return self.dependencies
@@ -194,13 +203,30 @@ class Pipeline:
         return self.outputs
 
     def _has_input(self, input: PipelineDataDefinition[PipelineDataType]) -> bool:
-        return input.name in self.data_records.keys()
-        #TODO: expand to allow for transforms
+        if input.name in self.data_records:
+            return True
+        return any(input.name in t.get_outputs().keys() for t in self.transforms)
 
 
     def _get_input(self, input: PipelineDataDefinition[PipelineDataType]) -> PipelineDataType:
-        return self.data_records[input.name]
-        #TODO: expand to allow for transforms
+        # First, try direct data lookup
+        if input.name in self.data_records:
+            return self.data_records[input.name]
+
+        # Otherwise, search for a transformer that can produce it
+        for transformer in self.transforms:
+            if input.name in transformer.get_outputs().keys():
+                # Build input map for transformer
+                required_inputs = {}
+                for key, expected_type in transformer.get_inputs().items():
+                    input_def = PipelineDataDefinition(type=expected_type, name=key)
+                    required_inputs[key] = self.resolve_input(self, input_def)  # Recurse if needed
+
+                result = transformer.transform(required_inputs)
+                self.data_records.update(result)
+                return result[input.name]  # After transform, input should be available
+
+        raise KeyError(f"No data or transformer found for input: {input.name}")
 
     def resolve_input(self, parent: Self, input: PipelineDataDefinition[PipelineDataType]) -> PipelineDataType:
         if self._has_input(input):
@@ -247,6 +273,37 @@ class Pipeline:
         self._run(inputs, parent)
         all_data = self.data_records
         return {k: v for k, v in all_data.items() if k in self.outputs.keys()}
+    
+    def _append_stage(self, stage: PipelineStage):
+        self.stages.append(stage)
+        if len(self.stages) == 1 and not self._deps_set:
+            self.dependencies = stage.get_inputs()
+        if not self._out_set:
+            self.outputs = stage.get_outputs()
+
+    def stage(self, stage: Union[callable, PipelineStage]) -> Self:
+        if callable(stage):
+            self._append_stage(FunctionStage(stage))
+        else:
+            self._append_stage(stage)
+        return self
+    
+    def transformer(self, transformer: Union[callable, PipelineTransformer]) -> Self:
+        if callable(transformer):
+            self.transforms.append(PipelineTransformer(transformer))
+        else:
+            self.transforms.append(transformer)
+        return self
+    
+    def dependency(self, dependencies: PipelineInputMap ) -> Self:
+        self._deps_set = True
+        self.dependencies = dependencies
+        return self
+
+    def output(self, outputs: PipelineOutputMap) -> Self:
+        self._out_set = True
+        self.outputs = outputs
+        return self
 
 class PipelineBranch(PipelineStage, Pipeline):
 
