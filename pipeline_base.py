@@ -1,11 +1,13 @@
 import dataclasses
 from functools import lru_cache, wraps
+from types import NoneType
 from typing import Annotated, Any, Dict, Generic, List, NamedTuple, Self, Tuple, Type, TypeAlias, TypeVar, Callable, Union, get_args, get_origin, get_type_hints, _GenericAlias
 from dataclasses import dataclass
 import inspect
 
 CACHE_SIZE = None
 CACHE_DEFAULT_SIZE = 128
+THROW_ERROR_ON_MISSING_RET_ANN = True
 
 PipelineDataType = TypeVar('PipelineDataType')
 
@@ -80,6 +82,9 @@ def normalize_result(result, output_names, stage_name):
 
     if len(output_names) == 1:
         return {output_names[0]: result}
+    
+    if len(output_names) == 0:
+        return {}
 
     raise TypeError(
         f"{stage_name} returned a single value, but multiple outputs are expected: {output_names}"
@@ -89,6 +94,8 @@ def infer_output_types(func, name: Union[str, None] = None, names: Union[List[st
     hints = get_type_hints(func)
     ret_ann = hints.get('return', None)
     if ret_ann is None:
+        if THROW_ERROR_ON_MISSING_RET_ANN:
+            raise SyntaxError("Must use return type annotation")
         return {}
 
     origin = get_origin(ret_ann)
@@ -111,6 +118,10 @@ def infer_output_types(func, name: Union[str, None] = None, names: Union[List[st
     # Case: Annotated[Dict, {"x": int, ...}]
     if origin is Annotated and isinstance(args[1], dict):
         return args[1]
+
+    if ret_ann is NoneType:
+        return {}
+    
 
     # Case: single primitive type (int, float, bool, str, etc.)
     if isinstance(ret_ann, type):
@@ -290,7 +301,6 @@ def stage(func=None, *, inputs=None, outputs=None, output_name=None, output_name
         return decorator
     return decorator(func)
 
-
 PipelineTransformers: TypeAlias = List[PipelineTransformer]
 PipelineStages: TypeAlias = List[PipelineStage]
 
@@ -437,3 +447,4 @@ class PipelineBranch(PipelineStage, Pipeline):
     def run(self, inputs: PipelineDataMap, parent=None) -> PipelineDataMap:
         Pipeline._run(self, inputs, parent)
         return self.data_records
+        
