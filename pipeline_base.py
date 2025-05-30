@@ -1,6 +1,8 @@
+import dataclasses
 from functools import lru_cache, wraps
-from typing import Any, Dict, Generic, List, Self, Type, TypeAlias, TypeVar, Callable, Union
+from typing import Annotated, Any, Dict, Generic, List, NamedTuple, Self, Tuple, Type, TypeAlias, TypeVar, Callable, Union, get_args, get_origin, get_type_hints, _GenericAlias
 from dataclasses import dataclass
+import inspect
 
 CACHE_SIZE = None
 CACHE_DEFAULT_SIZE = 128
@@ -28,6 +30,95 @@ def cache(func=None, *, size=CACHE_DEFAULT_SIZE):
         # Decorator called without parentheses, e.g. @cache
         return lru_cache(maxsize=size)(func)
 
+
+def normalize_io(io):
+    if io is None:
+        return {}
+    if isinstance(io, dict):
+        return io
+    if isinstance(io, list):
+        return {k: Any for k in io}
+    if isinstance(io, str):
+        return {io: Any}
+    raise TypeError("inputs/outputs must be dict, list, or str")
+
+def infer_input_types(func):
+    sig = inspect.signature(func)
+    inputs = {}
+    for name, param in sig.parameters.items():
+        if name == 'self':  # ignore methods self param
+            continue
+        if param.annotation is inspect.Parameter.empty:
+            inputs[name] = Any
+        else:
+            inputs[name] = param.annotation
+    return inputs
+
+def is_namedtuple_instance(x):
+    return (
+        isinstance(x, tuple) and
+        hasattr(x, "_fields")
+    )
+
+def normalize_result(result, output_names, stage_name):
+    if isinstance(result, dict):
+        return result
+
+    if isinstance(result, (tuple, list)):
+        if len(result) != len(output_names):
+            raise ValueError(
+                f"{stage_name} returned {len(result)} values, "
+                f"but expected {len(output_names)}: {output_names}"
+            )
+        return dict(zip(output_names, result))
+
+    if is_namedtuple_instance(result):
+        return result._asdict()
+
+    if dataclasses.is_dataclass(result):
+        return dataclasses.asdict(result)
+
+    if len(output_names) == 1:
+        return {output_names[0]: result}
+
+    raise TypeError(
+        f"{stage_name} returned a single value, but multiple outputs are expected: {output_names}"
+    )
+
+def infer_output_types(func, name: Union[str, None] = None, names: Union[List[str], None] = None) -> Dict[str, type]:
+    hints = get_type_hints(func)
+    ret_ann = hints.get('return', None)
+    if ret_ann is None:
+        return {}
+
+    origin = get_origin(ret_ann)
+    args = get_args(ret_ann)
+
+    # Case: Dict[str, T] – can't infer names
+    if origin in (dict, Dict):
+        return {}
+
+    # Case: Tuple[T1, T2, ...]
+    if origin in (tuple, Tuple):
+        if names and len(names) == len(args):
+            return {n: t for n, t in zip(names, args)}
+        return {}
+
+    # Case: TypedDict
+    if isinstance(ret_ann, type) and issubclass(ret_ann, dict) and hasattr(ret_ann, '__annotations__'):
+        return dict(ret_ann.__annotations__)
+
+    # Case: Annotated[Dict, {"x": int, ...}]
+    if origin is Annotated and isinstance(args[1], dict):
+        return args[1]
+
+    # Case: single primitive type (int, float, bool, str, etc.)
+    if isinstance(ret_ann, type):
+        key = name if name else "output"
+        return {key: ret_ann}
+
+    return {}
+
 class PipelineTransformer:
     
     def __init__(self, func):
@@ -37,6 +128,7 @@ class PipelineTransformer:
         self._func: Callable = func
         self._inputs: PipelineInputMap = getattr(func, "_pipeline_inputs", {})
         self._outputs: PipelineOutputMap = getattr(func, "_pipeline_outputs", {})
+        self._unwrap_inputs: bool = getattr(func, "_pipeline_unwrap_inputs", False)
         self._cached: bool = getattr(func, "_pipeline_cache", False)
 
     def has_cache(self):
@@ -72,24 +164,33 @@ class PipelineTransformer:
         
     def transform(self, inputs: PipelineDataMap) -> PipelineDataMap:
         self._validate_inputs(inputs)
-        return self._func(inputs)
+        if self._unwrap_inputs:
+            result = self._func(**inputs)
+        else:
+            result = self._func(inputs)
+        # Wrap the output if it's not a dict
+        output_names = list(self._outputs)
+        result = normalize_result(result, output_names, self._get_name())
+        return result
+    
+    def _get_name(self):
+        return getattr(self._func, '__name__', 'anonymous')
     
     def __repr__(self):
-        return f"<{self.__class__.__name__} func={getattr(self._func, '__name__', 'anonymous')} inputs={list(self._inputs.keys())} outputs={list(self._outputs.keys())}>"
+        return f"<{self.__class__.__name__} func={self._get_name()} inputs={list(self._inputs.keys())} outputs={list(self._outputs.keys())}>"
 
 
-def transformer(func=None, *, inputs=None, outputs=None):
-    if inputs is None: inputs = {}
-    if outputs is None: outputs = {}
-    @wraps(func)
-    def wrapper(f):
+def transformer(func=None, *, inputs=None, outputs=None, output_name=None, output_names=None):
+    def decorator(f):
         f._pipeline_transformer = True
-        f._pipeline_inputs = inputs
-        f._pipeline_outputs = outputs
+        f._pipeline_inputs = normalize_io(inputs) if inputs is not None else infer_input_types(f)
+        f._pipeline_outputs = normalize_io(outputs) if outputs is not None else infer_output_types(f, name=output_name, names=output_names)
+        f._pipeline_unwrap_inputs = inputs is None
         return f
+    
     if func is None:
-        return wrapper
-    return wrapper(func)
+        return decorator
+    return decorator(func)
 
     
 
@@ -122,8 +223,12 @@ class PipelineStage:
     def clear_cache(self):
         pass
 
+    def _get_name(self):
+        return 'anonymous'
+
+
     def __repr__(self):
-        return f"<{self.__class__.__name__} func={getattr(self._func, '__name__', 'anonymous')} inputs={list(self._inputs.keys())} outputs={list(self._outputs.keys())}>"
+        return f"<{self.__class__.__name__} func={self._get_name()} inputs={list(self._inputs.keys())} outputs={list(self._outputs.keys())}>"
 
 
         
@@ -137,6 +242,7 @@ class FunctionStage(PipelineStage):
         self._func: Callable = func
         self._inputs: PipelineInputMap = getattr(func, "_pipeline_inputs", {})
         self._outputs: PipelineOutputMap = getattr(func, "_pipeline_outputs", {})
+        self._unwrap_inputs: bool = getattr(func, "_pipeline_unwrap_inputs", False)
         self._cached: bool = getattr(func, "_pipeline_cache", False)
 
     def has_cache(self):
@@ -157,22 +263,33 @@ class FunctionStage(PipelineStage):
                 pass
         return None
     
+    def _get_name(self):
+        return getattr(self._func, '__name__', 'anonymous')
+
     def run(self, inputs: PipelineDataMap, pipeline=None) -> PipelineDataMap:
         self._validate_inputs(inputs)
-        return self._func(inputs)
+        if self._unwrap_inputs:
+            result = self._func(**inputs)
+        else:
+            result = self._func(inputs)
+        # Wrap the output if it's not a dict
+        output_names = list(self._outputs)
+        result = normalize_result(result, output_names, self._get_name())
+        return result
+    
 
-def stage(func=None, *, inputs=None, outputs=None):
-    if inputs is None: inputs = {}
-    if outputs is None: outputs = {}
-    @wraps(func)
-    def wrapper(f):
+def stage(func=None, *, inputs=None, outputs=None, output_name=None, output_names=None):
+    def decorator(f):
         f._pipeline_stage = True
-        f._pipeline_inputs = inputs
-        f._pipeline_outputs = outputs
+        f._pipeline_inputs = normalize_io(inputs) if inputs is not None else infer_input_types(f)
+        f._pipeline_outputs = normalize_io(outputs) if outputs is not None else infer_output_types(f, name=output_name, names=output_names)
+        f._pipeline_unwrap_inputs = inputs is None
         return f
+
     if func is None:
-        return wrapper
-    return wrapper(func)
+        return decorator
+    return decorator(func)
+
 
 PipelineTransformers: TypeAlias = List[PipelineTransformer]
 PipelineStages: TypeAlias = List[PipelineStage]
