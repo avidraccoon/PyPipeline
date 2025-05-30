@@ -1,5 +1,5 @@
 from functools import wraps
-from typing import Any, Dict, List, Self
+from typing import Any, Dict, Generic, List, Self, Type, TypeAlias, TypeVar
 from dataclasses import dataclass
 
 
@@ -15,7 +15,7 @@ class PipelineInputs:
 class PipelineStage:
 
     def __init__(self):
-        super.__init__()
+        super().__init__()
 
 class FunctionStage(PipelineStage):
 
@@ -26,32 +26,45 @@ class FunctionStage(PipelineStage):
     def get_inputs(self):
         return self.func._pipeline_inputs
 
-@dataclass
-class PipelineInputDefinition:
-    name: str
+
+
+
 
 @dataclass
 class PipelineDataRecord:
     dependencies: List[str]
 
+PipelineDataType = TypeVar('PipelineDataType')
 
-#dependencies
+@dataclass
+class PipelineDataDefinition(Generic[PipelineDataType]):
+    type: Type[PipelineDataType]
+    value: PipelineDataType
+
+PipelineInputMap: TypeAlias = Dict[str, Type[Any]]
+PipelineOutputMap: TypeAlias = Dict[str, Type[Any]]
+PipelineDataMap: TypeAlias = Dict[str, PipelineDataDefinition[Any]]
+PipelineTransformers: TypeAlias = List[PipelineTransformer[PipelineInputMap, PipelineOutputMap]]
+PipelineStages: TypeAlias = List[PipelineStage[PipelineInputMap, PipelineOutputMap]]
+
 class Pipeline:
 
     def __init__(self):
-        super.__init__()
-        self.providers: List[PipelineProvider] = []
-        self.stages: List[PipelineStage] = []
-        self.data_records: Dict[PipelineDataRecord, Any] = {}
-        self.dependencies: List[str] = []
-        self.outputs: List[str] = []
-        self.data: Dict[str, Any] = []
+        super().__init__()
+        self.transforms: PipelineTransformers = []
+        self.stages: PipelineStages = []
+        self.data_records: PipelineDataMap = {}
+        self.dependencies: PipelineInputMap = {}
+        self.outputs: PipelineOutputMap = {}
 
-    def _has_input(self, parent):
+    def _has_input(self, input: PipelineDataDefinition[PipelineDataType]) -> bool:
         pass
 
-    def resolve_input(self, parent: Self, input: str):
-        if self._has_input():
+    def _get_input(self, input: PipelineDataDefinition[PipelineDataType]) -> PipelineDataType:
+        pass
+
+    def resolve_input(self, parent: Self, input: PipelineDataDefinition[PipelineDataType]) -> PipelineDataType:
+        if self._has_input(input):
             pass
         if parent is not None:
             return parent.resolve_input(input)
@@ -63,11 +76,12 @@ class Pipeline:
     def _clear_cache(self):
         pass
 
-    def run(self, inputs):
+    def run(self, inputs: Dict[str, Type]):
         pass
 
 
 class PipelineBranch(PipelineStage, Pipeline):
 
     def __init__(self):
-        super.__init__()
+        PipelineStage.__init__(self)
+        Pipeline.__init__(self)
