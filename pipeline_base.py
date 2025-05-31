@@ -329,13 +329,13 @@ class Pipeline:
     def get_outputs(self) -> PipelineOutputMap:
         return self.outputs
 
-    def _has_input(self, input: PipelineDataDefinition[PipelineDataType]) -> bool:
+    def _has_input(self, parents,  input: PipelineDataDefinition[PipelineDataType]) -> bool:
         if input.name in self.data_records:
             return True
         return any(input.name in t.get_outputs().keys() for t in self.transforms)
 
 
-    def _get_input(self, input: PipelineDataDefinition[PipelineDataType]) -> PipelineDataType:
+    def _get_input(self, parents,  input: PipelineDataDefinition[PipelineDataType]) -> PipelineDataType:
         # First, try direct data lookup
         if input.name in self.data_records:
             return self.data_records[input.name]
@@ -347,19 +347,27 @@ class Pipeline:
                 required_inputs = {}
                 for key, expected_type in transformer.get_inputs().items():
                     input_def = PipelineDataDefinition(type=expected_type, name=key)
-                    required_inputs[key] = self.resolve_input(self, input_def)  # Recurse if needed
-
-                result = transformer.transform(required_inputs)
+                    try:
+                        required_inputs[key] = self.resolve_input(parents.copy(), input_def)  # Recurse if needed
+                    except LookupError as e:
+                        break;
+                
+                try:
+                    result = transformer.transform(required_inputs)
+                except KeyError as e:
+                    continue;
                 self.data_records.update(result)
                 return result[input.name]  # After transform, input should be available
-
+            
         raise KeyError(f"No data or transformer found for input: {input.name}")
 
-    def resolve_input(self, parent: Self, input: PipelineDataDefinition[PipelineDataType]) -> PipelineDataType:
-        if self._has_input(input):
-            return self._get_input(input)
-        if parent is not None:
-            return parent.resolve_input(input)
+    def resolve_input(self, parents: Self, input: PipelineDataDefinition[PipelineDataType]) -> PipelineDataType:
+        if self._has_input(parents, input):
+            return self._get_input(parents, input)
+        if parents is not None and len(parents) > 0:
+            parent = parents[-1]
+            parents.pop()
+            return parent.resolve_input(parents.copy(), input)
         raise LookupError("Could not find way to get input")
 
     def _clear_data(self):
@@ -379,25 +387,28 @@ class Pipeline:
             if not isinstance(inputs[key], expected_type):
                 raise TypeError(f"Expected type {expected_type} for {key}, got {type(inputs[key])}")
 
-    def _run(self, inputs: PipelineDataMap, parent=None) -> PipelineDataMap:
+    def _run(self, inputs: PipelineDataMap, parents=None) -> PipelineDataMap:
+        if parents == None:
+            parents = []
         self._validate_inputs(inputs)
         self.data_records.update(inputs)
         result = {}
+        parents.append(self)
         for stage in self.stages:
             required_inputs = {}
             for key, expected_type in stage.get_inputs().items():
                 input_def = PipelineDataDefinition(type=expected_type, name=key)
                 try:
-                    value = self.resolve_input(parent, input_def)
+                    value = self.resolve_input(parents.copy(), input_def)
                     required_inputs[key] = value
                 except LookupError:
                     raise KeyError(f"Missing required input '{key}' for stage {stage}")
-            result = stage.run(required_inputs, self)
+            result = stage.run(required_inputs, parents)
             self.data_records.update(result)
         return result
 
-    def run(self, inputs: PipelineDataMap, parent=None) -> PipelineDataMap:
-        self._run(inputs, parent)
+    def run(self, inputs: PipelineDataMap, parents=None) -> PipelineDataMap:
+        self._run(inputs, parents)
         all_data = self.data_records
         return {k: v for k, v in all_data.items() if k in self.outputs.keys()}
     
@@ -444,8 +455,8 @@ class PipelineBranch(PipelineStage, Pipeline):
     def get_outputs(self):
         return Pipeline.get_outputs(self)
 
-    def run(self, inputs: PipelineDataMap, parent=None) -> PipelineDataMap:
-        Pipeline._run(self, inputs, parent)
+    def run(self, inputs: PipelineDataMap, parents=None) -> PipelineDataMap:
+        Pipeline._run(self, inputs, parents)
         return self.data_records
         
 class MatchCaseBranch(PipelineBranch):
@@ -491,7 +502,7 @@ class MatchCaseBranch(PipelineBranch):
             outputs.update(self.finally_branch.get_outputs())
         return outputs
 
-    def run(self, inputs: PipelineDataMap, parent=None) -> PipelineDataMap:
+    def run(self, inputs: PipelineDataMap, parents=None) -> PipelineDataMap:
         match_value = inputs.get(self.key_name)
         result = {}
 
@@ -499,19 +510,19 @@ class MatchCaseBranch(PipelineBranch):
         matched = False
         for value, branch in self.cases:
             if value == match_value:
-                case_result = branch.run(inputs, parent)
+                case_result = branch.run(inputs, parents)
                 result.update(case_result)
                 matched = True
                 break
         
         # Run default if no case matched
         if not matched and self.default_branch:
-            default_result = self.default_branch.run(inputs, parent)
+            default_result = self.default_branch.run(inputs, parents)
             result.update(default_result)
 
         # Always run finally
         if self.finally_branch:
-            finally_result = self.finally_branch.run(inputs, parent)
+            finally_result = self.finally_branch.run(inputs, parents)
             result.update(finally_result)
 
         return result

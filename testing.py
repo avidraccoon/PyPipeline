@@ -4,6 +4,14 @@ from pipeline_base import stage, Pipeline, transformer
 def double(x: int) -> int:
     return x * 2
 
+@transformer(output_name="fds")
+def f(x: int, a: int) -> int:
+    return x * 3
+
+@transformer(output_name="x2")
+def triple(x: int, fds: int) -> int:
+    return x * 3
+
 @stage(output_name="x2plus1")
 def add_one(x2: int) -> int:
     return x2 + 1
@@ -23,7 +31,9 @@ def display_values(x: int, x2:int, x2plus1: int) -> None:
 main = (
     Pipeline()
         .dependency({"x": int})
+        .transformer(triple)
         .transformer(double)
+        .transformer(f)
         .stage(add_one)
         .match("x2plus1", lambda m: (
             m.case(11).stage(display_success),
