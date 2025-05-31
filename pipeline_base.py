@@ -7,7 +7,7 @@ import inspect
 
 CACHE_SIZE = None
 CACHE_DEFAULT_SIZE = 128
-THROW_ERROR_ON_MISSING_RET_ANN = True
+THROW_ERROR_ON_MISSING_RET_ANN = False
 
 PipelineDataType = TypeVar('PipelineDataType')
 
@@ -448,3 +448,99 @@ class PipelineBranch(PipelineStage, Pipeline):
         Pipeline._run(self, inputs, parent)
         return self.data_records
         
+class MatchCaseBranch(PipelineBranch):
+    def __init__(self, key_name: str):
+        super().__init__()
+        self.key_name = key_name
+        self.cases: List[Tuple[Any, PipelineBranch]] = []
+        self.default_branch: PipelineBranch | None = None
+        self.finally_branch: PipelineBranch | None = None
+
+    def case(self, value):
+        branch = PipelineBranch()
+        self.cases.append((value, branch))
+        return branch
+
+    def default(self):
+        self.default_branch = PipelineBranch()
+        return self.default_branch
+
+    def finally_(self):
+        self.finally_branch = PipelineBranch()
+        return self.finally_branch
+
+    def get_inputs(self):
+        # Inputs needed include the match key plus inputs required by any case/default/finally
+        inputs = {self.key_name: Any}
+        for _, branch in self.cases:
+            inputs.update(branch.get_inputs())
+        if self.default_branch:
+            inputs.update(self.default_branch.get_inputs())
+        if self.finally_branch:
+            inputs.update(self.finally_branch.get_inputs())
+        return inputs
+
+    def get_outputs(self):
+        # Outputs are union of all branches outputs
+        outputs = {}
+        for _, branch in self.cases:
+            outputs.update(branch.get_outputs())
+        if self.default_branch:
+            outputs.update(self.default_branch.get_outputs())
+        if self.finally_branch:
+            outputs.update(self.finally_branch.get_outputs())
+        return outputs
+
+    def run(self, inputs: PipelineDataMap, parent=None) -> PipelineDataMap:
+        match_value = inputs.get(self.key_name)
+        result = {}
+
+        # Run matched case
+        matched = False
+        for value, branch in self.cases:
+            if value == match_value:
+                case_result = branch.run(inputs, parent)
+                result.update(case_result)
+                matched = True
+                break
+        
+        # Run default if no case matched
+        if not matched and self.default_branch:
+            default_result = self.default_branch.run(inputs, parent)
+            result.update(default_result)
+
+        # Always run finally
+        if self.finally_branch:
+            finally_result = self.finally_branch.run(inputs, parent)
+            result.update(finally_result)
+
+        return result
+
+
+class MatchHelper:
+    def __init__(self, pipeline: Pipeline, key_name: str):
+        self.pipeline = pipeline
+        self.branch = MatchCaseBranch(key_name)
+
+    def case(self, value):
+        return self.branch.case(value)
+
+    def default(self):
+        return self.branch.default()
+
+    def finally_(self):
+        return self.branch.finally_()
+
+    def end(self):
+        self.pipeline.stage(self.branch)
+        return self.pipeline
+
+
+def match(self, key_name: str, fn: Callable[[MatchHelper], None]):
+    helper = MatchHelper(self, key_name)
+    fn(helper)
+    return helper.end()
+
+
+# Add match method to Pipeline dynamically
+setattr(Pipeline, "match", match)

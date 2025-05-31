@@ -16,20 +16,6 @@ pipeline = (
     ))
 )
 
-
-pipeline = (
-    Pipeline()
-        .match("mode", lambda m: (
-            m.case("debug_verbose")
-                .stage(display_debug_verbose),
-            m.case("debug_compact")
-                .stage(display_debug_compact),
-            m.default()
-                .stage(display_normal)
-        ))
-)
-
-
 =>
 
 pipeline = (
@@ -44,6 +30,21 @@ pipeline = (
                 )),
             b.default()
                 .stage(display_debug_compact)
+        ))
+)
+
+
+
+
+pipeline = (
+    Pipeline()
+        .match("mode", lambda m: (
+            m.case("debug_verbose")
+                .stage(display_debug_verbose),
+            m.case("debug_compact")
+                .stage(display_debug_compact),
+            m.default()
+                .stage(display_normal)
         ))
 )
 

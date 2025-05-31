@@ -9,12 +9,16 @@ def add_one(x2: int) -> int:
     return x2 + 1
 
 @stage
-def display(x2plus1: int) -> None:
-    print(x2plus1)
+def display_success() -> None:
+    print("It worked")
 
 @stage
-def display_debug(x2plus1: int) -> None:
-    print("Hello", x2plus1)
+def display_failure() -> None:
+    print("It failed")
+
+@stage
+def display_values(x: int, x2:int, x2plus1: int) -> None:
+    print(f"x: {x}, x2: {x2}, x2plus1: {x2plus1}")
 
 main = (
     Pipeline()
@@ -22,9 +26,9 @@ main = (
         .transformer(double)
         .stage(add_one)
         .match("x2plus1", lambda m: (
-            m.case(11).stage(display_debug),
-            m.default().stage(display),
-            m.finally_().stage(lambda inputs: print("Always runs."))
+            m.case(11).stage(display_success),
+            m.default().stage(display_failure),
+            m.finally_().stage(display_values)
         ))
 )
 
